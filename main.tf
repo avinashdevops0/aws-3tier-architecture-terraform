@@ -1,0 +1,193 @@
+resource "tls_private_key" "generated" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "key_pair" {
+  key_name   = "bastion"
+  public_key = tls_private_key.generated.public_key_openssh
+}
+
+resource "local_file" "private_key" {
+  content  = tls_private_key.generated.private_key_pem
+  filename = "bastion.pem"
+}
+
+
+module "vpc" {
+  source = "./modules/vpc"
+
+  vpc_cidr        = "10.0.0.0/16"
+  public_subnets  = ["10.0.1.0/24", "10.0.2.0/24"]
+  private_subnets = ["10.0.3.0/24", "10.0.4.0/24"]
+  db_subnets      = ["10.0.5.0/24", "10.0.6.0/24"]
+  azs             = ["us-east-1a", "us-east-1b"]
+}
+
+module "sg" {
+  source = "./modules/security-groups"
+
+  vpc_id = module.vpc.vpc_id
+}
+
+module "bastion" {
+  source = "./modules/ec2"
+
+  ami           = "ami-0ea87431b78a82070"   # Amazon Linux (update later)
+  instance_type = "t2.micro"
+  subnet_id     = module.vpc.public_subnets[0]
+  sg_id         = module.sg.bastion_sg
+  key_name      = aws_key_pair.key_pair.key_name
+}
+
+module "alb" {
+  source = "./modules/alb"
+
+  vpc_id          = module.vpc.vpc_id
+  public_subnets  = module.vpc.public_subnets
+  private_subnets = module.vpc.private_subnets
+  alb_sg          = module.sg.alb_sg
+}
+
+module "web_asg" {
+  source = "./modules/asg"
+
+  ami              = "ami-0ea87431b78a82070"
+  instance_type    = "t2.micro"
+  subnets          = module.vpc.public_subnets
+  sg_id            = module.sg.web_sg
+  target_group_arn = module.alb.web_target_group_arn
+  key_name         = aws_key_pair.key_pair.key_name
+  instance_name = "web-server"
+  user_data = <<-EOF
+              #!/bin/bash
+              yum update -y
+              yum install -y httpd
+              systemctl start httpd
+              systemctl enable httpd
+              echo "<h1>Frontend</h1>" > /var/www/html/index.html
+              EOF
+}
+
+module "app_asg" {
+  source = "./modules/asg"
+
+  ami              = "ami-0ea87431b78a82070"
+  instance_type    = "t2.micro"
+  subnets          = module.vpc.private_subnets
+  sg_id            = module.sg.app_sg
+  target_group_arn = module.alb.app_target_group_arn
+  key_name         = aws_key_pair.key_pair.key_name
+  instance_name = "app-server"
+
+  user_data = <<-EOF
+              #!/bin/bash
+              yum update -y
+              yum install -y nodejs
+              npm install -g pm2
+
+              cat <<EOT > app.js
+              const http = require('http');
+              http.createServer((req,res)=>{
+                res.end("Hello from App Tier");
+              }).listen(3000);
+              EOT
+
+              pm2 start app.js
+              EOF
+}
+
+module "rds" {
+  source = "./modules/rds"
+
+  db_subnets  = module.vpc.db_subnets
+  db_sg       = module.sg.db_sg
+  db_username = "admin"
+  db_password = "StrongPassword123"
+}
+
+
+module "vpc" {
+  source = "./modules/vpc"
+
+  vpc_cidr        = var.vpc_cidr
+  public_subnets  = var.public_subnets
+  private_subnets = var.private_subnets
+  db_subnets      = var.db_subnets
+  azs             = var.azs
+}
+
+module "sg" {
+  source = "./modules/security-groups"
+  vpc_id = module.vpc.vpc_id
+}
+
+module "alb" {
+  source = "./modules/alb"
+
+  vpc_id          = module.vpc.vpc_id
+  public_subnets  = module.vpc.public_subnets
+  private_subnets = module.vpc.private_subnets
+  alb_sg          = module.sg.alb_sg
+}
+
+module "web_asg" {
+  source = "./modules/asg"
+
+  # asg_name         = "Web-ASG"
+  ami              = var.ami
+  instance_type    = var.instance_type
+  subnets          = var.private_subnets
+  sg_id            = module.sg.web_sg
+  target_group_arn = module.alb.web_target_group_arn
+  key_name         = var.key_name
+  instance_name    = var.instance_name
+
+  user_data = <<-EOF
+              #!/bin/bash
+              yum install -y httpd
+              systemctl start httpd
+              echo "Web Tier" > /var/www/html/index.html
+              EOF
+}
+
+module "app_asg" {
+  source = "./modules/asg"
+
+  # asg_name         = "App-ASG"
+  ami              = var.ami
+  instance_type    = var.instance_type
+  subnets          = var.private_subnets
+  sg_id            = module.sg.app_sg
+  target_group_arn = module.alb.app_target_group_arn
+  key_name         = var.key_name
+  instance_name    = var.instance_name
+
+  user_data = <<-EOF
+              #!/bin/bash
+              yum install -y nodejs
+              npm install -g pm2
+              echo "App Tier running" > /home/ec2-user/app.txt
+              EOF
+}
+
+module "rds" {
+  source = "./modules/rds"
+
+  db_subnets  = module.vpc.db_subnets
+  db_sg       = module.sg.db_sg
+  db_username = var.db_username
+  db_password = var.db_password
+}
+
+module "bastion" {
+  source = "./modules/ec2"
+
+  ami           = var.ami
+  instance_type = var.instance_type
+  subnet_id     = module.vpc.public_subnets[0]
+  sg_id         = module.sg.bastion_sg
+  key_name      = var.key_name
+}
+
+
